@@ -1,0 +1,227 @@
+From f7d519a3b8db1af3751ad1d2010a3883660a5dd5 Mon Sep 17 00:00:00 2001
+From: Guation <guation@163.com>
+Date: Tue, 23 Jun 2026 10:44:19 +0800
+Subject: [PATCH] add sunxi_dram_para command
+
+---
+ cmd/Kconfig                       |   8 ++
+ cmd/Makefile                      |   2 +
+ cmd/sunxi_dram_para.c             | 163 ++++++++++++++++++++++++++++++
+ configs/radxa-cubie-a5e_defconfig |   2 +
+ 4 files changed, 175 insertions(+)
+ create mode 100644 cmd/sunxi_dram_para.c
+
+diff --git a/cmd/Kconfig b/cmd/Kconfig
+index da627fed8db..eed488eeda0 100644
+--- a/cmd/Kconfig
++++ b/cmd/Kconfig
+@@ -1919,6 +1919,14 @@ config CMD_SUNXI_MEMTEST
+ 	help
+ 	  enable sunxi memtester
+ 
++config CMD_SUNXI_DRAM_PARA
++	bool "enable sunxi dram para dump"
++	default n
++	help
++	  Enable command to dump DRAM training parameters from uboot_spare_head
++	  and boot parameter region. Supports 'basic' (32 entries) and 'full'
++	  (96 entries with training calibration data) subcommands.
++
+ config CMD_PWM_LED
+ 	bool "pwm led"
+ 	default n
+diff --git a/cmd/Makefile b/cmd/Makefile
+index 216af68208e..0ca602cdfc8 100644
+--- a/cmd/Makefile
++++ b/cmd/Makefile
+@@ -192,6 +192,8 @@ obj-$(CONFIG_CMD_PWM_LED) += cmd_pwm_led.o
+ 
+ obj-$(CONFIG_CMD_SUNXI_MEMTEST) += sunxi_memtest.o ./memtest/mem_tests.o
+ 
++obj-$(CONFIG_CMD_SUNXI_DRAM_PARA) += sunxi_dram_para.o
++
+ obj-$(CONFIG_CMD_SUNXI_CE_TEST) += sunxi_ce_test.o
+ 
+ obj-$(CONFIG_CMD_SUNXI_SYSRECOVERY_TEST) += sunxi_sysrecovery_test.o
+diff --git a/cmd/sunxi_dram_para.c b/cmd/sunxi_dram_para.c
+new file mode 100644
+index 00000000000..85e932903ca
+--- /dev/null
++++ b/cmd/sunxi_dram_para.c
+@@ -0,0 +1,163 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * sunxi_dram_para.c - Dump DRAM training parameters from boot structures
++ *
++ * Copyright (C) 2025
++ */
++
++#include <common.h>
++#include <command.h>
++#include <private_uboot.h>
++#include <boot_param.h>
++
++DECLARE_GLOBAL_DATA_PTR;
++
++/* dram_para[32] field labels from dram_v2.h dram_para_t struct */
++static const char *const dram_para_labels[32] = {
++	"dram_clk",
++	"dram_type",
++	"dram_dx_odt",
++	"dram_dx_dri",
++	"dram_ca_dri",
++	"dram_para0",
++	"dram_para1",
++	"dram_para2",
++	"dram_mr0",
++	"dram_mr1",
++	"dram_mr2",
++	"dram_mr3",
++	"dram_mr4",
++	"dram_mr5",
++	"dram_mr6",
++	"dram_mr11",
++	"dram_mr12",
++	"dram_mr13",
++	"dram_mr14",
++	"dram_mr16",
++	"dram_mr17",
++	"dram_mr22",
++	"dram_tpr0",
++	"dram_tpr1",
++	"dram_tpr2",
++	"dram_tpr3",
++	"dram_tpr6",
++	"dram_tpr10",
++	"dram_tpr11",
++	"dram_tpr12",
++	"dram_tpr13",
++	"dram_tpr14",
++};
++
++static const char *dram_type_str(unsigned int type)
++{
++	switch (type) {
++	case 2:  return "DDR2";
++	case 3:  return "DDR3";
++	case 6:  return "LPDDR2";
++	case 7:  return "LPDDR3";
++	case 8:  return "LPDDR4";
++	case 31: return "DDR3L";
++	default: return "UNKNOWN";
++	}
++}
++
++static void dump_basic(void)
++{
++	unsigned int *dram_para = (unsigned int *)uboot_spare_head.boot_data.dram_para;
++	unsigned int dram_size_mb = uboot_spare_head.boot_data.dram_scan_size;
++	unsigned int training_flag;
++	int i;
++
++	printf("DRAM Summary:\n");
++	printf("  Frequency   : %u MHz\n", dram_para[0]);
++	printf("  Type        : %u (%s)\n", dram_para[1], dram_type_str(dram_para[1]));
++	printf("  Size        : %u MB\n", dram_size_mb);
++
++	training_flag = (dram_para[23] >> 31) & 0x1;
++	printf("  Training    : %s (flag=%u)\n",
++	       training_flag ? "SKIPPED" : "DONE", training_flag);
++
++	printf("\ndram_para[32] from uboot_spare_head:\n");
++	for (i = 0; i < 32; i++) {
++		const char *label = dram_para_labels[i];
++		if (!label)
++			label = "extended";
++		printf("  [%02d] %-14s = 0x%08x (%u)\n",
++		       i, label, dram_para[i], dram_para[i]);
++	}
++}
++
++static void dump_full(void)
++{
++	typedef_sunxi_boot_param *bp;
++	unsigned int *ddr_info;
++	unsigned int training_flag;
++	int i;
++
++	if (!gd || !gd->boot_param) {
++		printf("ERROR: boot_param not available (relocation not done?)\n");
++		printf("Use 'sunxi_dram_para basic' for uboot_spare_head data.\n");
++		return;
++	}
++
++	bp = (typedef_sunxi_boot_param *)gd->boot_param;
++	ddr_info = (unsigned int *)bp->ddr_info;
++
++	training_flag = (ddr_info[23] >> 31) & 0x1;
++	printf("ddr_info[96] from gd->boot_param:\n");
++	printf("  Training flag (entry[23] bit31): %u (%s)\n",
++	       training_flag, training_flag ? "SKIPPED" : "DONE");
++
++	for (i = 0; i < MAX_DRAMPARA_SIZE; i++) {
++		const char *label;
++
++		if (i < 32 && dram_para_labels[i])
++			label = dram_para_labels[i];
++		else if (i < 32)
++			label = "extended";
++		else
++			label = "training";
++
++		printf("  [%02d] %-14s = 0x%08x (%u)\n",
++		       i, label, ddr_info[i], ddr_info[i]);
++	}
++}
++
++static int do_sunxi_dram_para(cmd_tbl_t *cmdtp, int flag, int argc,
++			      char *const argv[])
++{
++	const char *mode;
++
++	if (argc < 2)
++		mode = "summary";
++	else
++		mode = argv[1];
++
++	if (strcmp(mode, "basic") == 0) {
++		dump_basic();
++	} else if (strcmp(mode, "full") == 0) {
++		dump_full();
++	} else if (strcmp(mode, "summary") == 0) {
++		dump_basic();
++		/* Also try to dump training info if available */
++		if (gd && gd->boot_param)
++			dump_full();
++	} else {
++		printf("Usage: sunxi_dram_para [summary|basic|full]\n");
++		printf("  summary  - dump basic + try full (default)\n");
++		printf("  basic    - dump dram_para[32] from uboot_spare_head\n");
++		printf("  full     - dump ddr_info[96] from boot_param\n");
++		return CMD_RET_USAGE;
++	}
++
++	return 0;
++}
++
++U_BOOT_CMD(
++	sunxi_dram_para, CONFIG_SYS_MAXARGS, 1, do_sunxi_dram_para,
++	"dump DRAM training parameters",
++	"sunxi_dram_para [summary|basic|full]\n"
++	"  summary  - dump DRAM summary + basic + full (default)\n"
++	"  basic    - dump dram_para[32] from uboot_spare_head\n"
++	"  full     - dump ddr_info[96] from gd->boot_param"
++);
+diff --git a/configs/radxa-cubie-a5e_defconfig b/configs/radxa-cubie-a5e_defconfig
+index e80e0f2f320..aac93292d22 100644
+--- a/configs/radxa-cubie-a5e_defconfig
++++ b/configs/radxa-cubie-a5e_defconfig
+@@ -128,3 +128,5 @@ CONFIG_SUNXI_BOOT_PARAM=y
+ #
+ CONFIG_AUTOBOOT=y
+ CONFIG_BOOTDELAY=0
++
++CONFIG_CMD_SUNXI_DRAM_PARA=y
+-- 
+2.43.0
+
