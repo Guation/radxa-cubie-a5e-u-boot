@@ -24,7 +24,7 @@ If Docker hasn't been installed, install it. [Link](https://docs.docker.com/engi
 
 If nodejs hasn't been installed, install it. [Link](https://nodejs.org/en/download)
 
-Do `groups | grep docker || usermod -aG docker $(users)`, Add Docker permissions for the current user.
+Do `groups | grep docker || sudo usermod -aG docker $(users)`, Add Docker permissions for the current user.
 
 Exit the shell and log in again for the configuration to take effect.
 
